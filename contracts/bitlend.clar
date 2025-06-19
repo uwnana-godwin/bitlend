@@ -189,3 +189,99 @@
     )
   )
 )
+
+;; Remove loan from user's active loan list
+(define-private (remove-loan-from-user
+    (user principal)
+    (loan-id uint)
+  )
+  (match (map-get? user-loans { user: user })
+    user-data (let (
+        (current-loans (get active-loans user-data))
+        (filtered-loans (fold filter-loan-helper current-loans {
+          target-id: loan-id,
+          result: (list),
+        }))
+      )
+      (begin
+        (map-set user-loans { user: user }
+          (merge user-data { active-loans: (get result filtered-loans) })
+        )
+        true
+      )
+    )
+    false
+  )
+)
+
+;; Helper function for filtering loans using fold
+(define-private (filter-loan-helper
+    (loan-id uint)
+    (acc {
+      target-id: uint,
+      result: (list 10 uint),
+    })
+  )
+  (if (not (is-eq loan-id (get target-id acc)))
+    (merge acc { result: (unwrap-panic (as-max-len? (append (get result acc) loan-id) u10)) })
+    acc
+  )
+)
+
+;; LIQUIDATION ENGINE
+
+;; Check if position requires liquidation
+(define-private (check-liquidation-eligibility (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan (match (map-get? asset-prices { asset: (get collateral-asset loan) })
+      price-data (let ((current-ratio (calculate-collateral-ratio (get collateral-amount loan)
+          (get loan-amount loan) (get price price-data)
+        )))
+        (<= current-ratio (var-get liquidation-threshold))
+      )
+      false
+    )
+    false
+  )
+)
+
+;; Execute liquidation process
+(define-private (execute-liquidation (loan-id uint))
+  (match (map-get? loans { loan-id: loan-id })
+    loan (begin
+      ;; Update loan status
+      (map-set loans { loan-id: loan-id } (merge loan { status: "liquidated" }))
+      ;; Remove from user's active loans
+      (remove-loan-from-user (get borrower loan) loan-id)
+      ;; Update platform metrics
+      (var-set total-btc-locked
+        (- (var-get total-btc-locked) (get collateral-amount loan))
+      )
+      (ok true)
+    )
+    ERR-LOAN-NOT-FOUND
+  )
+)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Initialize the lending protocol
+(define-public (initialize-platform)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (var-get platform-initialized)) ERR-ALREADY-INITIALIZED)
+    ;; Set initial price feeds
+    (map-set asset-prices { asset: "BTC" } {
+      price: u4000000000000,
+      last-updated: stacks-block-height,
+      oracle: tx-sender,
+    })
+    (map-set asset-prices { asset: "STX" } {
+      price: u200000000,
+      last-updated: stacks-block-height,
+      oracle: tx-sender,
+    })
+    (var-set platform-initialized true)
+    (ok "BitLend Protocol Initialized Successfully")
+  )
+)
