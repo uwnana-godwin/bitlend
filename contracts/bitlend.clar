@@ -96,3 +96,96 @@
     total-collateral: uint,
   }
 )
+
+;; Oracle Price Feeds
+(define-map asset-prices
+  { asset: (string-ascii 3) }
+  {
+    price: uint,
+    last-updated: uint,
+    oracle: principal,
+  }
+)
+
+;; Platform Access Control
+(define-map authorized-oracles
+  { oracle: principal }
+  { authorized: bool }
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+;; Calculate collateral-to-loan ratio with precision
+(define-private (calculate-collateral-ratio
+    (collateral uint)
+    (loan uint)
+    (asset-price uint)
+  )
+  (if (is-eq loan u0)
+    u0
+    (let (
+        (collateral-value (/ (* collateral asset-price) u100000000)) ;; Adjust for 8 decimal precision
+        (ratio (/ (* collateral-value u10000) loan)) ;; Return as basis points
+      )
+      ratio
+    )
+  )
+)
+
+;; Calculate compound interest with block-based precision
+(define-private (calculate-compound-interest
+    (principal uint)
+    (rate uint)
+    (blocks uint)
+  )
+  (if (is-eq blocks u0)
+    u0
+    (let (
+        (daily-rate (/ rate u365)) ;; Annual rate to daily
+        (block-rate (/ daily-rate BLOCKS-PER-DAY)) ;; Daily to per-block
+        (simple-interest (/ (* (* principal block-rate) blocks) u10000))
+      )
+      simple-interest
+    )
+  )
+)
+
+;; Validate loan exists and is accessible
+(define-private (validate-loan-access
+    (loan-id uint)
+    (caller principal)
+  )
+  (match (map-get? loans { loan-id: loan-id })
+    loan (and
+      (is-eq (get borrower loan) caller)
+      (is-eq (get status loan) "active")
+    )
+    false
+  )
+)
+
+;; Check if asset is supported by the protocol
+(define-private (is-supported-asset (asset (string-ascii 3)))
+  (is-some (index-of VALID-ASSETS asset))
+)
+
+;; Validate price feed data integrity
+(define-private (is-valid-price (price uint))
+  (and
+    (> price u0)
+    (<= price MAX-PRICE-VALUE)
+  )
+)
+
+;; Safe arithmetic operations to prevent overflow
+(define-private (safe-add
+    (a uint)
+    (b uint)
+  )
+  (let ((result (+ a b)))
+    (if (>= result a) ;; Check for overflow
+      (ok result)
+      ERR-ARITHMETIC-OVERFLOW
+    )
+  )
+)
