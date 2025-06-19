@@ -285,3 +285,138 @@
     (ok "BitLend Protocol Initialized Successfully")
   )
 )
+
+;; Update risk management parameters
+(define-public (set-risk-parameters
+    (min-collateral uint)
+    (liquidation-limit uint)
+    (fee-rate uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (>= min-collateral MIN-COLLATERAL-RATIO) ERR-INVALID-AMOUNT)
+    (asserts! (>= liquidation-limit u100) ERR-INVALID-AMOUNT)
+    (asserts! (<= fee-rate u1000) ERR-INVALID-AMOUNT) ;; Max 10% fee
+    (var-set minimum-collateral-ratio min-collateral)
+    (var-set liquidation-threshold liquidation-limit)
+    (var-set platform-fee-rate fee-rate)
+    (ok true)
+  )
+)
+
+;; Update asset price feeds (Oracle function)
+(define-public (update-asset-price
+    (asset (string-ascii 3))
+    (new-price uint)
+  )
+  (begin
+    (asserts!
+      (or
+        (is-eq tx-sender CONTRACT-OWNER)
+        (default-to false
+          (get authorized (map-get? authorized-oracles { oracle: tx-sender }))
+        )
+      )
+      ERR-NOT-AUTHORIZED
+    )
+    (asserts! (is-supported-asset asset) ERR-INVALID-ASSET)
+    (asserts! (is-valid-price new-price) ERR-INVALID-PRICE)
+    (ok (map-set asset-prices { asset: asset } {
+      price: new-price,
+      last-updated: stacks-block-height,
+      oracle: tx-sender,
+    }))
+  )
+)
+
+;; Emergency pause mechanism
+(define-public (toggle-platform-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (var-set platform-paused (not (var-get platform-paused)))
+    (ok (var-get platform-paused))
+  )
+)
+
+;; CORE LENDING FUNCTIONS
+
+;; Deposit collateral and request loan
+(define-public (create-loan
+    (collateral-asset (string-ascii 3))
+    (collateral-amount uint)
+    (loan-amount uint)
+  )
+  (let (
+      (asset-price-data (unwrap! (map-get? asset-prices { asset: collateral-asset })
+        ERR-NOT-INITIALIZED
+      ))
+      (asset-price (get price asset-price-data))
+      (collateral-ratio (calculate-collateral-ratio collateral-amount loan-amount asset-price))
+      (loan-id (+ (var-get total-loans-issued) u1))
+      (platform-fee (/ (* loan-amount (var-get platform-fee-rate)) u10000))
+      (net-loan-amount (- loan-amount platform-fee))
+    )
+    (begin
+      ;; Validation checks
+      (asserts! (var-get platform-initialized) ERR-NOT-INITIALIZED)
+      (asserts! (not (var-get platform-paused)) ERR-NOT-INITIALIZED)
+      (asserts! (is-supported-asset collateral-asset) ERR-INVALID-ASSET)
+      (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (> loan-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (>= collateral-ratio (var-get minimum-collateral-ratio))
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+      ;; Create loan record
+      (map-set loans { loan-id: loan-id } {
+        borrower: tx-sender,
+        collateral-asset: collateral-asset,
+        collateral-amount: collateral-amount,
+        loan-amount: loan-amount,
+        interest-rate: (var-get base-interest-rate),
+        start-height: stacks-block-height,
+        last-interest-calc: stacks-block-height,
+        accumulated-interest: u0,
+        status: "active",
+      })
+      ;; Update user portfolio
+      (match (map-get? user-loans { user: tx-sender })
+        existing-portfolio (let (
+            (current-loans (get active-loans existing-portfolio))
+            (new-loans-list (unwrap! (as-max-len? (append current-loans loan-id) u10)
+              ERR-INVALID-AMOUNT
+            ))
+          )
+          (map-set user-loans { user: tx-sender } {
+            active-loans: new-loans-list,
+            total-borrowed: (+ (get total-borrowed existing-portfolio) loan-amount),
+            total-collateral: (+ (get total-collateral existing-portfolio) collateral-amount),
+          })
+        )
+        (map-set user-loans { user: tx-sender } {
+          active-loans: (list loan-id),
+          total-borrowed: loan-amount,
+          total-collateral: collateral-amount,
+        })
+      )
+      ;; Update platform metrics
+      (if (is-eq collateral-asset "BTC")
+        (var-set total-btc-locked
+          (+ (var-get total-btc-locked) collateral-amount)
+        )
+        (var-set total-stx-locked
+          (+ (var-get total-stx-locked) collateral-amount)
+        )
+      )
+      (var-set total-loans-issued loan-id)
+      (var-set total-value-borrowed
+        (+ (var-get total-value-borrowed) loan-amount)
+      )
+      (var-set protocol-revenue (+ (var-get protocol-revenue) platform-fee))
+      (ok {
+        loan-id: loan-id,
+        net-amount: net-loan-amount,
+        fee: platform-fee,
+      })
+    )
+  )
+)
