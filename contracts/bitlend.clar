@@ -518,3 +518,55 @@
     )
   )
 )
+
+;; Get user's complete portfolio
+(define-read-only (get-user-portfolio (user principal))
+  (map-get? user-loans { user: user })
+)
+
+;; Get current platform analytics
+(define-read-only (get-platform-analytics)
+  {
+    total-btc-locked: (var-get total-btc-locked),
+    total-stx-locked: (var-get total-stx-locked),
+    total-loans-issued: (var-get total-loans-issued),
+    total-value-borrowed: (var-get total-value-borrowed),
+    protocol-revenue: (var-get protocol-revenue),
+    platform-tvl: (+
+      (* (var-get total-btc-locked)
+        (default-to u0 (get price (map-get? asset-prices { asset: "BTC" })))
+      )
+      (* (var-get total-stx-locked)
+        (default-to u0 (get price (map-get? asset-prices { asset: "STX" })))
+      )),
+  }
+)
+
+;; Get current risk parameters
+(define-read-only (get-risk-parameters)
+  {
+    minimum-collateral-ratio: (var-get minimum-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-threshold),
+    platform-fee-rate: (var-get platform-fee-rate),
+    base-interest-rate: (var-get base-interest-rate),
+  }
+)
+
+;; Get asset price information
+(define-read-only (get-asset-price (asset (string-ascii 3)))
+  (map-get? asset-prices { asset: asset })
+)
+
+;; Get supported assets
+(define-read-only (get-supported-assets)
+  VALID-ASSETS
+)
+
+;; Check platform status
+(define-read-only (get-platform-status)
+  {
+    initialized: (var-get platform-initialized),
+    paused: (var-get platform-paused),
+    contract-owner: CONTRACT-OWNER,
+  }
+)
