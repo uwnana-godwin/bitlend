@@ -420,3 +420,101 @@
     )
   )
 )
+
+;; Repay loan with accumulated interest
+(define-public (repay-loan (loan-id uint))
+  (begin
+    ;; Input validation
+    (asserts! (> loan-id u0) ERR-INVALID-LOAN-ID)
+    (asserts! (<= loan-id (var-get total-loans-issued)) ERR-INVALID-LOAN-ID)
+    (match (map-get? loans { loan-id: loan-id })
+      loan (let (
+          (validated-loan-id loan-id) ;; Create validated binding
+          (blocks-elapsed (- stacks-block-height (get last-interest-calc loan)))
+          (new-interest (calculate-compound-interest (get loan-amount loan)
+            (get interest-rate loan) blocks-elapsed
+          ))
+          (total-interest (+ (get accumulated-interest loan) new-interest))
+          (total-repayment (+ (get loan-amount loan) total-interest))
+        )
+        (begin
+          ;; Authorization validation
+          (asserts! (is-eq (get borrower loan) tx-sender) ERR-NOT-AUTHORIZED)
+          (asserts! (is-eq (get status loan) "active") ERR-LOAN-NOT-ACTIVE)
+          ;; Update loan status
+          (map-set loans { loan-id: validated-loan-id }
+            (merge loan {
+              status: "repaid",
+              accumulated-interest: total-interest,
+              last-interest-calc: stacks-block-height,
+            })
+          )
+          ;; Update user portfolio
+          (remove-loan-from-user tx-sender validated-loan-id)
+          ;; Update platform metrics
+          (if (is-eq (get collateral-asset loan) "BTC")
+            (var-set total-btc-locked
+              (- (var-get total-btc-locked) (get collateral-amount loan))
+            )
+            (var-set total-stx-locked
+              (- (var-get total-stx-locked) (get collateral-amount loan))
+            )
+          )
+          (var-set protocol-revenue (+ (var-get protocol-revenue) total-interest))
+          (ok {
+            principal: (get loan-amount loan),
+            interest: total-interest,
+            total: total-repayment,
+            collateral-returned: (get collateral-amount loan),
+          })
+        )
+      )
+      ERR-LOAN-NOT-FOUND
+    )
+  )
+)
+
+;; Liquidate undercollateralized position
+(define-public (liquidate-loan (loan-id uint))
+  (begin
+    ;; Input validation
+    (asserts! (> loan-id u0) ERR-INVALID-LOAN-ID)
+    (asserts! (<= loan-id (var-get total-loans-issued)) ERR-INVALID-LOAN-ID)
+    (asserts! (check-liquidation-eligibility loan-id) ERR-INVALID-LIQUIDATION)
+    (execute-liquidation loan-id)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Get comprehensive loan details
+(define-read-only (get-loan-info (loan-id uint))
+  (begin
+    ;; Input validation for read-only function
+    (asserts! (> loan-id u0) ERR-INVALID-LOAN-ID)
+    (asserts! (<= loan-id (var-get total-loans-issued)) ERR-INVALID-LOAN-ID)
+    (match (map-get? loans { loan-id: loan-id })
+      loan (let (
+          (blocks-elapsed (- stacks-block-height (get last-interest-calc loan)))
+          (pending-interest (calculate-compound-interest (get loan-amount loan)
+            (get interest-rate loan) blocks-elapsed
+          ))
+          (total-interest (+ (get accumulated-interest loan) pending-interest))
+        )
+        (ok {
+          loan-details: loan,
+          current-interest: total-interest,
+          total-owed: (+ (get loan-amount loan) total-interest),
+          health-factor: (calculate-collateral-ratio (get collateral-amount loan)
+            (get loan-amount loan)
+            (default-to u0
+              (get price
+                (map-get? asset-prices { asset: (get collateral-asset loan) })
+              ))
+          ),
+        })
+      )
+      ERR-LOAN-NOT-FOUND
+    )
+  )
+)
